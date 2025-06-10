@@ -1,5 +1,6 @@
 use anyhow::Result;
 use openmls::prelude::*;
+use openmls::prelude::tls_codec::Serialize;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_basic_credential::SignatureKeyPair;
 use reqwest::Client;
@@ -28,9 +29,9 @@ impl MlsClient {
         
         // Generate a credential for this client
         let credential = Credential::new(
-            client_id.as_bytes().to_vec(),
             CredentialType::Basic,
-        )?;
+            client_id.as_bytes().to_vec(),
+        );
         let signer = SignatureKeyPair::new(ciphersuite.signature_algorithm())
             .expect("Error generating signature key pair");
         
@@ -39,7 +40,7 @@ impl MlsClient {
             signature_key: signer.public().into(),
         };
 
-        let mut client = Self {
+        let client = Self {
             client_id,
             server_url,
             http_client,
@@ -206,13 +207,13 @@ impl MlsClient {
         
         let key_package = KeyPackage::builder()
             .build(
-                CryptoConfig::with_default_version(ciphersuite),
+                ciphersuite,
                 &provider,
                 &self.signer,
                 self.credential_with_key.clone(),
             )?;
 
-        let key_package_bytes = key_package.tls_serialize_detached()?;
+        let key_package_bytes = key_package.key_package().tls_serialize_detached()?;
 
         let request = UploadKeyPackageRequest {
             client_id: self.client_id.clone(),

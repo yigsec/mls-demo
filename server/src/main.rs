@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -19,6 +20,19 @@ use types::*;
 
 mod mls_manager;
 use mls_manager::MlsManager;
+
+#[derive(Parser)]
+#[command(name = "openmls-server")]
+#[command(about = "OpenMLS Server - Secure group messaging server using MLS protocol")]
+struct Args {
+    /// Server host address
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    
+    /// Server port
+    #[arg(long, default_value = "8080")]
+    port: u16,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +51,8 @@ pub struct GroupInfo {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    
     tracing_subscriber::fmt::init();
 
     let state = AppState {
@@ -48,17 +64,18 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/groups", get(list_groups).post(create_group))
-        .route("/groups/:group_id", get(get_group))
-        .route("/groups/:group_id/join", post(join_group))
-        .route("/groups/:group_id/leave", post(leave_group))
-        .route("/groups/:group_id/messages", get(get_messages).post(send_message))
+        .route("/groups/{group_id}", get(get_group))
+        .route("/groups/{group_id}/join", post(join_group))
+        .route("/groups/{group_id}/leave", post(leave_group))
+        .route("/groups/{group_id}/messages", get(get_messages).post(send_message))
         .route("/key_packages", post(upload_key_package))
-        .route("/key_packages/:client_id", get(get_key_package))
+        .route("/key_packages/{client_id}", get(get_key_package))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    info!("Server running on http://127.0.0.1:8080");
+    let bind_address = format!("{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind(&bind_address).await?;
+    info!("Server running on http://{}", bind_address);
 
     axum::serve(listener, app).await?;
     Ok(())
