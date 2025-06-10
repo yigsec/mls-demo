@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 mod types;
 
+mod client_persistence;
 mod mls_client;
+
 use mls_client::MlsClient;
 
 #[derive(Parser)]
@@ -15,12 +17,16 @@ use mls_client::MlsClient;
 struct Cli {
     #[clap(subcommand)]
     command: Option<Commands>,
-    
+
     #[clap(long, default_value = "http://127.0.0.1:8080")]
     server_url: String,
-    
+
     #[clap(long)]
     client_id: Option<String>,
+
+    /// Data directory for persistent storage
+    #[clap(long, default_value = "./data")]
+    data_dir: String,
 }
 
 #[derive(Subcommand)]
@@ -32,13 +38,13 @@ enum Commands {
     /// List all groups
     ListGroups,
     /// Join a group
-    JoinGroup { group_id: String },
+    JoinGroup { group_name: String },
     /// Leave a group
-    LeaveGroup { group_id: String },
+    LeaveGroup { group_name: String },
     /// Send a message to a group
-    SendMessage { group_id: String, message: String },
+    SendMessage { group_name: String, message: String },
     /// Get messages from a group
-    GetMessages { group_id: String },
+    GetMessages { group_name: String },
     /// Generate and upload key package
     UploadKeyPackage,
 }
@@ -48,9 +54,11 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let client_id = cli.client_id.unwrap_or_else(|| format!("client_{}", Uuid::new_v4()));
-    
-    let mut mls_client = MlsClient::new(cli.server_url, client_id.clone()).await?;
+    let client_id = cli
+        .client_id
+        .unwrap_or_else(|| format!("client_{}", Uuid::new_v4()));
+
+    let mut mls_client = MlsClient::new(cli.server_url, client_id.clone(), &cli.data_dir).await?;
 
     match cli.command {
         Some(Commands::Interactive) | None => {
@@ -67,34 +75,38 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 println!("Groups:");
                 for group in groups {
-                    println!("  {} - {} ({} members)", group.id, group.name, group.members.len());
+                    println!("  '{}' ({} members)", group.name, group.members.len());
                 }
             }
         }
-        Some(Commands::JoinGroup { group_id }) => {
-            let group_uuid = Uuid::parse_str(&group_id)?;
-            let group = mls_client.join_group(group_uuid).await?;
+        Some(Commands::JoinGroup { group_name }) => {
+            let group = mls_client.join_group_name(&group_name).await?;
             println!("Joined group: {}", group.name);
         }
-        Some(Commands::LeaveGroup { group_id }) => {
-            let group_uuid = Uuid::parse_str(&group_id)?;
-            mls_client.leave_group(group_uuid).await?;
-            println!("Left group: {}", group_id);
+        Some(Commands::LeaveGroup { group_name }) => {
+            mls_client.leave_group_name(&group_name).await?;
+            println!("Left group: {}", group_name);
         }
-        Some(Commands::SendMessage { group_id, message }) => {
-            let group_uuid = Uuid::parse_str(&group_id)?;
-            mls_client.send_message(group_uuid, &message).await?;
-            println!("Message sent to group: {}", group_id);
+        Some(Commands::SendMessage {
+            group_name,
+            message,
+        }) => {
+            mls_client.send_message_name(&group_name, &message).await?;
+            println!("Message sent to group: {}", group_name);
         }
-        Some(Commands::GetMessages { group_id }) => {
-            let group_uuid = Uuid::parse_str(&group_id)?;
-            let messages = mls_client.get_messages(group_uuid).await?;
+        Some(Commands::GetMessages { group_name }) => {
+            let messages = mls_client.get_messages_name(&group_name).await?;
             if messages.is_empty() {
-                println!("No messages in group: {}", group_id);
+                println!("No messages in group: {}", group_name);
             } else {
-                println!("Messages in group {}:", group_id);
+                println!("Messages in group {}:", group_name);
                 for msg in messages {
-                    println!("  [{}] {}: {}", msg.timestamp.format("%H:%M:%S"), msg.sender, msg.content);
+                    println!(
+                        "  [{}] {}: {}",
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.sender,
+                        msg.content
+                    );
                 }
             }
         }
@@ -109,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn interactive_mode(mls_client: &mut MlsClient) -> anyhow::Result<()> {
     let mut rl = DefaultEditor::new()?;
-    
+
     println!("OpenMLS Client Interactive Mode");
     println!("Client ID: {}", mls_client.client_id());
     println!("Server: {}", mls_client.server_url());
@@ -163,14 +175,24 @@ async fn handle_interactive_command(
         "help" | "h" => {
             println!("Available commands:");
             println!("  help                     - Show this help");
-            println!("  create <name>           - Create a new group");
-            println!("  list                    - List all groups");
-            println!("  join <group_id>         - Join a group");
-            println!("  leave <group_id>        - Leave a group");
-            println!("  send <group_id> <msg>   - Send a message to a group");
-            println!("  messages <group_id>     - Get messages from a group");
-            println!("  upload-key              - Upload key package");
-            println!("  quit                    - Exit the client");
+            println!("  create <name>            - Create a new group");
+            println!("  list                     - List all groups");
+            println!("  join <group_name>        - Join a group");
+            println!("  leave <group_name>       - Leave a group");
+            println!(
+                "  add <group_name> <user>  - Add a member to a group (requires Welcome workflow)"
+            );
+            println!("  send <group_name> <msg>  - Send a message to a group");
+            println!("  messages <group_name>    - Get messages from a group");
+            println!("  reset <group_name>       - Reset group state (fix compatibility issues)");
+            println!(
+                "  epochs                   - Show stored epoch keys for historical decryption"
+            );
+            println!(
+                "  decryption-stats         - Show comprehensive decryption capability statistics"
+            );
+            println!("  upload-key               - Upload key package");
+            println!("  quit                     - Exit the client");
         }
         "create" | "c" => {
             if parts.len() < 2 {
@@ -188,53 +210,96 @@ async fn handle_interactive_command(
             } else {
                 println!("Groups:");
                 for group in groups {
-                    println!("  {} - {} ({} members)", group.id, group.name, group.members.len());
+                    println!("  '{}' ({} members)", group.name, group.members.len());
                 }
             }
         }
         "join" | "j" => {
             if parts.len() < 2 {
-                println!("Usage: join <group_id>");
+                println!("Usage: join <group_name>");
                 return Ok(false);
             }
-            let group_uuid = Uuid::parse_str(parts[1])?;
-            let group = mls_client.join_group(group_uuid).await?;
+            let group = mls_client.join_group_name(parts[1]).await?;
             println!("Joined group: {}", group.name);
         }
         "leave" => {
             if parts.len() < 2 {
-                println!("Usage: leave <group_id>");
+                println!("Usage: leave <group_name>");
                 return Ok(false);
             }
-            let group_uuid = Uuid::parse_str(parts[1])?;
-            mls_client.leave_group(group_uuid).await?;
+            mls_client.leave_group_name(parts[1]).await?;
             println!("Left group: {}", parts[1]);
+        }
+        "add" => {
+            if parts.len() < 3 {
+                println!("Usage: add <group_name> <user_id>");
+                return Ok(false);
+            }
+            let group_uuid = mls_client.resolve_group_name(parts[1]).await?;
+            mls_client.add_member_to_group(group_uuid, parts[2]).await?;
+            println!("Added member {} to group: {}", parts[2], parts[1]);
         }
         "send" | "s" => {
             if parts.len() < 3 {
-                println!("Usage: send <group_id> <message>");
+                println!("Usage: send <group_name> <message>");
                 return Ok(false);
             }
-            let group_uuid = Uuid::parse_str(parts[1])?;
             let message = parts[2..].join(" ");
-            mls_client.send_message(group_uuid, &message).await?;
+            mls_client.send_message_name(parts[1], &message).await?;
             println!("Message sent to group: {}", parts[1]);
         }
         "messages" | "m" => {
             if parts.len() < 2 {
-                println!("Usage: messages <group_id>");
+                println!("Usage: messages <group_name>");
                 return Ok(false);
             }
-            let group_uuid = Uuid::parse_str(parts[1])?;
-            let messages = mls_client.get_messages(group_uuid).await?;
+            let messages = mls_client.get_messages_name(parts[1]).await?;
             if messages.is_empty() {
                 println!("No messages in group: {}", parts[1]);
             } else {
                 println!("Messages in group {}:", parts[1]);
+
+                // Count successfully decrypted historical messages
+                let historical_messages = messages
+                    .iter()
+                    .filter(|msg| {
+                        msg.content
+                            .contains("Successfully decrypted message from previous epoch")
+                            || msg.content.contains("Comprehensive decryption successful")
+                    })
+                    .count();
+
+                if historical_messages > 0 {
+                    println!(
+                        "  ✓ {} message(s) successfully decrypted using stored epoch keys",
+                        historical_messages
+                    );
+                    println!("");
+                }
+
                 for msg in messages {
-                    println!("  [{}] {}: {}", msg.timestamp.format("%H:%M:%S"), msg.sender, msg.content);
+                    println!(
+                        "  [{}] {}: {}",
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.sender,
+                        msg.content
+                    );
                 }
             }
+        }
+        "reset" | "r" => {
+            if parts.len() < 2 {
+                println!("Usage: reset <group_name>");
+                return Ok(false);
+            }
+            mls_client.reset_group_state(parts[1]).await?;
+            println!("Reset group state for: {}", parts[1]);
+        }
+        "epochs" | "e" => {
+            mls_client.show_epoch_keys().await?;
+        }
+        "decryption-stats" | "ds" => {
+            mls_client.get_decryption_stats().await?;
         }
         "upload-key" | "uk" => {
             mls_client.upload_key_package().await?;
@@ -245,9 +310,12 @@ async fn handle_interactive_command(
             return Ok(true);
         }
         _ => {
-            println!("Unknown command: {}. Type 'help' for available commands.", parts[0]);
+            println!(
+                "Unknown command: {}. Type 'help' for available commands.",
+                parts[0]
+            );
         }
     }
 
     Ok(false)
-} 
+}
